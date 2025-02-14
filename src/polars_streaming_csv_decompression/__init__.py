@@ -344,10 +344,16 @@ def streaming_csv(
         n_rows: int | None,
         batch_size: int | None,
     ) -> Iterator[pl.DataFrame]:
-        eol_char_as_bytes = eol_char.encode("utf-8")
+        comment_prefix_as_bytes = (
+            comment_prefix.encode("utf-8") if comment_prefix else None
+        )
+        eol_char_as_bytes = eol_char[0].encode("utf-8")
+
         n_seen_rows = 0
         n_rows_still_to_read = n_rows
-        n_rows_skipped = 0
+        n_rows_before_header_skipped = 0
+        n_rows_header_and_after_header_skipped = 0
+
         next_newline_in_block = -1
         row_index_offset_adjusted = row_index_offset
         csv_bytesio = io.BytesIO()
@@ -358,29 +364,98 @@ def streaming_csv(
                 block = fh.read(1024 * 128 * 10)
                 if block:
                     if n_seen_rows == 0:
-                        # Skip rows before header, header itself and rows after header.
-                        total_rows_to_skip = (
-                            skip_rows
-                            + skip_lines
-                            + int(has_header)
-                            + skip_rows_after_header
-                        )
+                        # Skip certain rows at start of file before passing data to
+                        # `pl.scan_csv`:
+                        #   - Skip rows before header: `skip_rows` + `skip_lines` > 0
+                        #   - Skip comment lines before header line for lines that
+                        #     start with `comment_prefix`.
+                        #   - Skip header line if `has_header=True`.
+                        #   - Skip rows after header: `skip_rows_after_header` > 0
 
-                        if total_rows_to_skip > 0:
-                            while n_rows_skipped < total_rows_to_skip:
+                        skip_rows_before_header = skip_rows + skip_lines
+
+                        # Skip rows before header.
+                        if n_rows_before_header_skipped < skip_rows_before_header:
+                            while (
+                                n_rows_before_header_skipped < skip_rows_before_header
+                            ):
                                 next_newline_in_block = block.find(
                                     eol_char_as_bytes, next_newline_in_block + 1
                                 )
+
                                 if next_newline_in_block == -1:
+                                    # No more newline characters in current block.
+                                    # Will trigger reading next block below.
                                     break
 
-                                n_rows_skipped += 1
+                                # Increment number of rows skipped before header if
+                                # newline was found.
+                                n_rows_before_header_skipped += 1
 
-                            if n_rows_skipped < total_rows_to_skip:
+                            if n_rows_before_header_skipped < skip_rows_before_header:
                                 # Read next block to find the next newline character.
                                 continue
 
-                            # Update block so it does not contain the skipped rows.
+                            # Update block so it does not contain the skipped rows
+                            # before the header.
+                            block = block[next_newline_in_block + 1 :]
+                            next_newline_in_block = -1
+
+                        # Skip comment lines before the header if comment prefix is set.
+                        if comment_prefix_as_bytes:
+                            # Skip lines starting with comment prefix.
+                            while block.startswith(comment_prefix_as_bytes):
+                                next_newline_in_block = block.find(eol_char_as_bytes)
+                                if next_newline_in_block == -1:
+                                    # No more newline characters in current block.
+                                    # Will trigger reading next block below.
+                                    break
+
+                                # Update block so it does not contain the comment line.
+                                block = block[next_newline_in_block + 1 :]
+                                next_newline_in_block = -1
+
+                            if block.startswith(comment_prefix_as_bytes):
+                                # Read next block to find the next newline character for
+                                # the current comment line.
+                                # As the next read block will not contain the comment
+                                # prefix anymore at the start, skip the line by
+                                # decrementing `n_rows_before_header_skipped`, so the
+                                # skip rows before header logic will remove that partial
+                                # comment line of the next block.
+                                n_rows_before_header_skipped -= 1
+                                continue
+
+                        # Remove header line if `has_header=True` as the schema is
+                        # already set and `pl.scan_csv` should not see that line.
+                        skip_header_and_rows_after_header = (
+                            int(has_header) + skip_rows_after_header
+                        )
+
+                        # Skip header and rows after header.
+                        if skip_header_and_rows_after_header > 0:
+                            while (
+                                n_rows_header_and_after_header_skipped
+                                < skip_header_and_rows_after_header
+                            ):
+                                next_newline_in_block = block.find(
+                                    eol_char_as_bytes, next_newline_in_block + 1
+                                )
+
+                                if next_newline_in_block == -1:
+                                    break
+
+                                n_rows_header_and_after_header_skipped += 1
+
+                            if (
+                                n_rows_header_and_after_header_skipped
+                                < skip_header_and_rows_after_header
+                            ):
+                                # Read next block to find the next newline character.
+                                continue
+
+                            # Update block so it does not contain the skipped header and
+                            # rows after header.
                             block = block[next_newline_in_block + 1 :]
 
                     # Find last newline character in block, so `pl.scan_csv` will

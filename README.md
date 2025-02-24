@@ -13,6 +13,10 @@ As it is mainly intended for reading large compressed CSV/TSV files produced by 
 assumed to be separated by `eol_char` (=`"\n"` by default) and embedded `eol_char` in fields are not expected. The last
 record also should end in `eol_char`. If those conditions are not met, reading such files could give corrupt data.
 
+It can also be used for decoding CSV files with a different character encoding than `utf8` and/or for decoding CSV files for
+which not all bytes can be decoded in that encoding. Compared with `read_csv`, the decoding will require a lower amount of
+total memory.
+
 Streaming decompression is handled by [xopen](https://github.com/pycompression/xopen/), which supports the following compression
 formats and backends and automatically selects the best backend available on the system:
   - gzip (`.gz`):
@@ -55,5 +59,24 @@ import polars_streaming_csv_decompression
         pl.col("a") > 10
     )  # the filter is pushed down the scan, so less data is read into memory
     .head(100)  # constrain number of returned results to 100
+)
+
+
+# Read CSV file with non-utf8 encoding in a streaming fashion.
+(
+    polars_streaming_csv_decompression.streaming_csv(
+        "file_encoded_in_windows-1252.csv",
+        encoding="windows-1252",
+    )
+    .head()
+)
+
+# Read CSV file with non-utf8 encoding where not all bytes can be decoded in a streaming fashion.
+(
+    polars_streaming_csv_decompression.streaming_csv(
+        "file_encoded_in_windows-1252_but_not_all_bytes_can_be_decoded.csv",
+        encoding="windows-1252-lossy",
+    )
+    .head()
 )
 ```

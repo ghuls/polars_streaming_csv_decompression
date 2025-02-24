@@ -144,7 +144,7 @@ def streaming_csv(
         Set `infer_schema=False` to read all columns as `pl.String`.
     n_rows
         Stop reading from CSV file after reading `n_rows`.
-    encoding : {'utf8', 'utf8-lossy'}
+    encoding : {'utf8', 'utf8-lossy', 'windows-1252', 'windows-1252-lossy', ...}
         Lossy means that invalid utf8 values are replaced with `�`
         characters. Defaults to "utf8".
     low_memory
@@ -217,11 +217,37 @@ def streaming_csv(
         # Write decompressed data to a BytesIO object.
         csv_bytesio = io.BytesIO()
 
+        has_utf8_utf8_lossy_encoding = (
+            encoding in {"utf8", "utf8-lossy"} if encoding else True
+        )
+        encoding_str = encoding if encoding else "utf8"
+        encoding_str, encoding_errors = (
+            (encoding_str[:-6], "replace")
+            if encoding_str.endswith("-lossy")
+            else (encoding_str, "strict")
+        )
+
         with xopen.xopen(source, "rb") as fh_compressed_csv:
             if infer_schema_length is None:
+                if not has_utf8_utf8_lossy_encoding:
+                    with io.TextIOWrapper(
+                        fh_compressed_csv, encoding=encoding_str, errors=encoding_errors
+                    ) as csv_textio:
+                        # Decode CSV file in block with provided encoding which
+                        # can be optionally lossy and encode output as `utf8`.
+                        block = csv_textio.read(1024 * 128 * 10).encode("utf8")
+
+                        while len(block) > 0:
+                            csv_bytesio.write(block)
+                            block = csv_textio.read(1024 * 128 * 10).encode("utf8")
+
+                        csv_bytesio.seek(0)
+
                 # Read the whole file to infer schema.
                 lf = pl.scan_csv(
-                    fh_compressed_csv.read(),
+                    fh_compressed_csv.read()
+                    if has_utf8_utf8_lossy_encoding
+                    else csv_bytesio.read(),
                     has_header=has_header,
                     separator=separator,
                     comment_prefix=comment_prefix,
@@ -238,7 +264,7 @@ def streaming_csv(
                     infer_schema=infer_schema,
                     infer_schema_length=infer_schema_length,
                     n_rows=n_rows,
-                    encoding=encoding,
+                    encoding=encoding if has_utf8_utf8_lossy_encoding else "utf8",
                     low_memory=low_memory,
                     rechunk=rechunk,
                     skip_rows_after_header=skip_rows_after_header,
@@ -302,6 +328,17 @@ def streaming_csv(
             # the start.
             csv_bytesio.seek(0)
 
+            if not has_utf8_utf8_lossy_encoding:
+                # Decode current data in `csv_bytesio` with provided encoding which
+                # can be optionally lossy and encode output as `utf8`.
+                csv_bytesio.write(
+                    csv_bytesio.getvalue()
+                    .decode(encoding_str, errors=encoding_errors)
+                    .encode("utf8")
+                )
+                csv_bytesio.truncate()
+                csv_bytesio.seek(0)
+
             lf = pl.scan_csv(
                 csv_bytesio,
                 has_header=has_header,
@@ -320,7 +357,7 @@ def streaming_csv(
                 infer_schema=infer_schema,
                 infer_schema_length=infer_schema_length,
                 n_rows=n_rows,
-                encoding=encoding,
+                encoding=encoding_str if has_utf8_utf8_lossy_encoding else "utf8",
                 low_memory=low_memory,
                 rechunk=rechunk,
                 skip_rows_after_header=skip_rows_after_header,
@@ -357,6 +394,16 @@ def streaming_csv(
         next_newline_in_block = -1
         row_index_offset_adjusted = row_index_offset
         csv_bytesio = io.BytesIO()
+
+        has_utf8_utf8_lossy_encoding = (
+            encoding in {"utf8", "utf8-lossy"} if encoding else True
+        )
+        encoding_str = encoding if encoding else "utf8"
+        encoding_str, encoding_errors = (
+            (encoding_str[:-6], "replace")
+            if encoding_str.endswith("-lossy")
+            else (encoding_str, "strict")
+        )
 
         with xopen.xopen(source, "rb") as fh:
             # Decompress CSV/TSV file in blocks and yield DataFrames for each block.
@@ -474,6 +521,17 @@ def streaming_csv(
                     csv_bytesio.truncate()
                     csv_bytesio.seek(0)
 
+                    if not has_utf8_utf8_lossy_encoding:
+                        # Decode current data in `csv_bytesio` with provided encoding
+                        # which can be optionally lossy and encode output as `utf8`.
+                        csv_bytesio.write(
+                            csv_bytesio.getvalue()
+                            .decode(encoding_str, errors=encoding_errors)
+                            .encode("utf8")
+                        )
+                        csv_bytesio.truncate()
+                        csv_bytesio.seek(0)
+
                     schema_of_csv_for_scan_csv = schema_of_csv.copy()
 
                     if row_index_name is not None:
@@ -504,7 +562,9 @@ def streaming_csv(
                         infer_schema=False,
                         infer_schema_length=infer_schema_length,
                         n_rows=n_rows_still_to_read,
-                        encoding=encoding,
+                        encoding=encoding_str
+                        if has_utf8_utf8_lossy_encoding
+                        else "utf8",
                         low_memory=low_memory,
                         rechunk=rechunk,
                         skip_rows_after_header=0,
